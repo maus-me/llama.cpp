@@ -1,0 +1,205 @@
+name: Release (Windows, CUDA)
+
+# Manual trigger + tag push. Builds a Windows CUDA zip ready for LM Studio
+# backend replacement, using modern CUDA compute capabilities
+# (sm_75 / sm_86 / sm_89 / sm_120 → RTX 20/30/40/50 series).
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0-bailingmoe3). Leave blank to skip release publish.'
+        required: false
+        default: ''
+        type: string
+      release_notes:
+        description: 'Optional release notes override.'
+        required: false
+        default: ''
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-windows-cuda
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  BUILD_DIR: build
+  ARTIFACT_DIR: llama-bin-win-cuda-x64
+  # Modern CUDA arch set: sm_120 (RTX 5090), sm_89 (RTX 4090),
+  # sm_86 (RTX 30-series), sm_75 (Turing fallback)
+  CUDA_ARCHS: "75;86;89;120"
+
+jobs:
+  build-windows-cuda:
+    name: Build Windows CUDA x64
+    runs-on: windows-2022
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: update
+
+      - name: Set up MSVC developer command prompt
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          echo "MSVC initialized" >> "%GITHUB_ENV%"
+
+      - name: Install Ninja
+        shell: cmd
+        run: |
+          choco install ninja --install-arguments 'ADD=C:\ninja' -y
+          echo "C:\ninja" >> "%GITHUB_ENV%"
+
+      - name: Install CUDA Toolkit 12.4
+        uses: ./.github/actions/windows-setup-cuda
+        with:
+          cuda_version: '12.4'
+
+      - name: Configure (CMake)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          cmake -S . -B %BUILD_DIR% -G "Ninja Multi-Config" ^
+            -DCMAKE_CUDA_ARCHITECTURES="%CUDA_ARCHS%" ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_BORINGSSL=ON ^
+            -DLLAMA_CURL=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_BACKEND_DL=ON ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_CUDA=ON ^
+            -DGGML_RPC=ON ^
+            -DGGML_CUDA_CUB_3DOT2=ON
+        env:
+          CUDACXX: "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe"
+
+      - name: Build (Release)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          if %NINJA_JOBS% LSS 1 set NINJA_JOBS=1
+          cmake --build %BUILD_DIR% --config Release -j %NINJA_JOBS%
+        env:
+          CUDACXX: "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe"
+
+      - name: Collect release artifacts
+        shell: cmd
+        run: |
+          if not exist "%ARTIFACT_DIR%" mkdir "%ARTIFACT_DIR%"
+          REM Copy all Release binaries (executables + DLLs)
+          xcopy /Y /I /E "%BUILD_DIR%\bin\Release\*.exe" "%ARTIFACT_DIR%\" 1>nul
+          xcopy /Y /I /E "%BUILD_DIR%\bin\Release\*.dll" "%ARTIFACT_DIR%\" 1>nul
+          REM Include licenses + readme so the bundle is self-contained
+          copy /Y LICENSE "%ARTIFACT_DIR%\LICENSE" 1>nul
+          copy /Y README.md "%ARTIFACT_DIR%\README.md" 1>nul
+          echo --- contents of %ARTIFACT_DIR% ---
+          dir /B "%ARTIFACT_DIR%"
+        env:
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+
+      - name: Verify CUDA backend DLL was produced
+        shell: cmd
+        run: |
+          if not exist "%ARTIFACT_DIR%\ggml-cuda.dll" (
+            echo ::error::ggml-cuda.dll missing from build output - CUDA backend not linked
+            exit /b 1
+          )
+          dir "%ARTIFACT_DIR%\ggml-cuda.dll"
+          dir "%ARTIFACT_DIR%\llama-server.exe" 2>nul
+          dir "%ARTIFACT_DIR%\llama-cli.exe" 2>nul
+
+      - name: Show DLL dependencies (sanity check)
+        shell: cmd
+        run: |
+          where dumpbin >nul 2>nul
+          if %ERRORLEVEL% equ 0 (
+            dumpbin /dependents "%ARTIFACT_DIR%\ggml-cuda.dll" | findstr /I "cudart cublas cufft"
+          ) else (
+            echo dumpbin not on PATH - skipping dependency check
+          )
+
+      - name: Zip release
+        shell: cmd
+        run: |
+          powershell -NoProfile -Command "Compress-Archive -Path '%ARTIFACT_DIR%\*' -DestinationPath '%ARTIFACT_DIR%.zip' -Force"
+          dir "%ARTIFACT_DIR%.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_DIR }}
+          path: ${{ env.ARTIFACT_DIR }}.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-windows-cuda
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-slim
+    timeout-minutes: 15
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT_DIR }}
+
+      - name: Determine tag + name
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="${{ inputs.tag_name }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "skip_release=true" >> "$GITHUB_OUTPUT"
+            echo "No tag provided - skipping release publish (artifact is still in Actions UI)"
+          else
+            echo "skip_release=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: steps.meta.outputs.skip_release != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          NOTES="${{ inputs.release_notes }}"
+          if [ -z "$NOTES" ]; then
+            NOTES="Windows CUDA x64 build for LM Studio.
+
+          Compute capabilities: sm_75, sm_86, sm_89, sm_120
+          (RTX 20/30/40/50 series + Turing fallback)
+
+          ## Install in LM Studio
+          1. Open LM Studio -> Settings -> Developer -> \"Use a local llama.cpp\"
+          2. Point it at the extracted folder (the one containing llama-server.exe and ggml-cuda.dll)
+
+          ## Notes
+          - Built from aetherbird/llama.cpp @ ${{ github.sha }}
+          - Branch: ${{ github.ref_name }}
+          - Bundled backends: CUDA (NVIDIA), CPU (all variants), RPC
+          - ggml-cuda.dll is loaded dynamically by llama-server at startup
+          "
+          fi
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$TAG" \
+            --notes "$NOTES" \
+            "${{ env.ARTIFACT_DIR }}.zip#llama-bin-win-cuda-x64.zip"
+          echo "Release $TAG published"
