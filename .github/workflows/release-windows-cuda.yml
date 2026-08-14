@@ -58,10 +58,10 @@ jobs:
           choco install ninja -y
           setx PATH "C:\Program Files (x86)\Ninja;%PATH%"
 
-      - name: Install CUDA Toolkit 12.4
+      - name: Install CUDA Toolkit 13.3
         uses: ./.github/actions/windows-setup-cuda
         with:
-          cuda_version: '12.4'
+          cuda_version: '13.3'
 
       - name: Configure (CMake)
         shell: cmd
@@ -76,10 +76,7 @@ jobs:
             -DGGML_BACKEND_DL=ON ^
             -DGGML_CPU_ALL_VARIANTS=ON ^
             -DGGML_CUDA=ON ^
-            -DGGML_RPC=ON ^
-            -DGGML_CUDA_CUB_3DOT2=ON
-        env:
-          CUDACXX: "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe"
+            -DGGML_RPC=ON
 
       - name: Build (Release)
         shell: cmd
@@ -88,8 +85,6 @@ jobs:
           set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
           if %NINJA_JOBS% LSS 1 set NINJA_JOBS=1
           cmake --build %BUILD_DIR% --config Release -j %NINJA_JOBS%
-        env:
-          CUDACXX: "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc.exe"
 
       - name: Collect release artifacts
         shell: cmd
