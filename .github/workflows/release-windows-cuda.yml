@@ -175,7 +175,7 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           NOTES="${{ inputs.release_notes }}"
           if [ -z "$NOTES" ]; then
-            NOTES="Windows CUDA x64 build for LM Studio.
+            NOTES="Windows CUDA x64 build of llama.cpp with bailingmoe3 fixes, ready for LM Studio.
 
           Compute capabilities: sm_75, sm_86, sm_89, sm_120
           (RTX 20/30/40/50 series + Turing fallback)
@@ -185,7 +185,8 @@ jobs:
           2. Point it at the extracted folder (the one containing llama-server.exe and ggml-cuda.dll)
 
           ## Notes
-          - Built from aetherbird/llama.cpp @ ${{ github.sha }}
+          - Source: aetherbird/llama.cpp branch bailingmoe3-support (forked from ggml-org/llama.cpp)
+          - This build: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
           - Branch: ${{ github.ref_name }}
           - Bundled backends: CUDA (NVIDIA), CPU (all variants), RPC
           - ggml-cuda.dll is loaded dynamically by llama-server at startup
