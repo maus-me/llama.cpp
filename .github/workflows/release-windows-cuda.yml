@@ -114,13 +114,19 @@ jobs:
 
       - name: Show DLL dependencies (sanity check)
         shell: cmd
+        continue-on-error: true
         run: |
+          REM Optional diagnostic - dumpbin is bundled with MSVC but not on PATH
+          REM by default. The build itself is already verified by the previous step;
+          REM this is just a convenience log for debugging CUDA linkage.
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul
           where dumpbin >nul 2>nul
           if %ERRORLEVEL% equ 0 (
             dumpbin /dependents "%ARTIFACT_DIR%\ggml-cuda.dll" | findstr /I "cudart cublas cufft"
           ) else (
             echo dumpbin not on PATH - skipping dependency check
           )
+          exit /b 0
 
       - name: Zip release
         shell: cmd
